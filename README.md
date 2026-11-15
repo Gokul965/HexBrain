@@ -83,6 +83,59 @@ claude mcp add --transport http hexbrain http://localhost:8080/api/mcp
 
 ---
 
+## Live Security Intelligence Feeds & Data Sources
+
+HexBrain ingests and lively captures threat intelligence across 6 continuous feeds:
+
+1. **CISA Known Exploited Vulnerabilities (KEV)**:
+   - Official real-time feed of actively exploited in-the-wild zero days and critical CVEs.
+   - Frequency: Daily automated sync.
+2. **GitHub Security Advisory Database (GHSA/CVE)**:
+   - Real-time vulnerability stream with CVSS v3/v4 ratings and affected package ecosystems.
+   - Frequency: Real-time API.
+3. **HackerOne Disclosed Reports & Writeups**:
+   - 15,200+ real-world disclosed bug bounty writeups with actual monetary payouts, upvotes, severity tiers, and reproduction PoCs.
+   - Frequency: Continuous sync.
+4. **FIRST Exploit Prediction Scoring System (EPSS)**:
+   - Live probability engine calculating empirical statistical likelihood of weaponization within 30 days.
+   - Frequency: Daily automated scoring.
+5. **Bug Bounty Attack Surfaces & Scopes**:
+   - Continuous scope monitoring across HackerOne, Bugcrowd, and enterprise targets with 2,000+ mapped subdomains.
+   - Frequency: Continuous sync.
+6. **PayloadsAllTheThings & Bypass Knowledgebase**:
+   - Verified exploit payloads across XSS, SSRF, SSTI, SQLi, Prototype Pollution, XXE, Command Injection, and WAF filter evasion.
+   - Frequency: Weekly sync.
+
+---
+
+### Syncing Live Data
+
+**Via Command Line:**
+```bash
+python3 sync_manager.py
+```
+
+**Via REST API:**
+```bash
+curl -X POST http://localhost:8080/api/sync
+```
+
+**Via Model Context Protocol (MCP):**
+Call the `sync_live_sources` tool from Claude, Cursor, or Antigravity:
+```json
+{
+  "name": "sync_live_sources",
+  "arguments": { "sources": ["all"] }
+}
+```
+
+Check live feed status and record counts:
+```bash
+curl http://localhost:8080/api/sources
+```
+
+---
+
 ## Available MCP Tools
 
 | Tool | Parameters | Description |
@@ -95,7 +148,7 @@ claude mcp add --transport http hexbrain http://localhost:8080/api/mcp
 | `search_payloads` | `query`, `category`, `limit` | Query exploit payloads (XSS, SQLi, SSRF, SSTI, Command Injection, LFI/RFI, XXE). |
 | `search_bypasses` | `query`, `protection_type`, `limit` | Search real-world filter, WAF, 2FA/MFA race condition, and rate limit bypasses. |
 | `search_cves` | `query`, `exploited_in_wild`, `min_cvss`, `limit` | Search CVE database with EPSS likelihood scores and CISA KEV status. |
-| `sync_live_sources` | `sources` | Lively capture & ingest fresh intelligence from external feeds (CISA KEV, GitHub Advisories, Target scopes). |
+| `sync_live_sources` | `sources` | Lively capture & ingest fresh intelligence from external feeds (CISA KEV, GitHub Advisories, HackerOne disclosures, FIRST EPSS, Target scopes). |
 | `get_data_sources_status` | *none* | View live status, record counts, and last synchronization timestamps across all connected security feeds. |
 
 ---

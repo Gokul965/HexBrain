@@ -1,30 +1,40 @@
 {
-  "last_sync": "2026-11-15 11:55:18Z",
+  "last_sync": "2026-11-15 12:05:21Z",
   "sources": {
     "cisa_kev": {
       "status": "synced",
       "count": 1781,
-      "last_updated": "2026-11-15 11:55:18Z"
+      "last_updated": "2026-11-15 12:05:21Z"
     },
     "github_advisories": {
       "status": "synced",
       "count": 30,
-      "last_updated": "2026-11-15 11:55:18Z"
+      "last_updated": "2026-11-15 12:05:21Z"
     },
     "first_epss": {
-      "status": "ready",
-      "count": 1781,
-      "last_updated": null
+      "status": "synced",
+      "count": 100,
+      "last_updated": "2026-11-15 12:05:21Z"
     },
     "bounty_targets": {
       "status": "synced",
-      "count": 89,
-      "last_updated": "2026-11-15 11:55:18Z"
+      "count": 108,
+      "last_updated": "2026-11-15 12:05:21Z"
     },
     "payloads": {
       "status": "ready",
       "count": 18,
       "last_updated": null
+    },
+    "hackerone_disclosures": {
+      "status": "synced",
+      "count": 3000,
+      "last_updated": "2026-11-15 12:05:21Z"
+    },
+    "payloads_bypasses": {
+      "status": "synced",
+      "count": 25,
+      "last_updated": "2026-11-15 12:05:21Z"
     }
   }
 }

@@ -190,7 +190,7 @@ TOOLS = [
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": ["all", "cisa_kev", "github_advisories", "bounty_targets"]
+                        "enum": ["all", "cisa_kev", "github_advisories", "hackerone_disclosures", "first_epss", "bounty_targets", "payloads_bypasses"]
                     },
                     "description": "List of sources to synchronize (default: ['all'])"
                 }
@@ -652,7 +652,11 @@ def execute_tool(name, args):
         return "\n".join(lines)
 
     elif name == "sync_live_sources":
-        from sync_manager import sync_all_sources, sync_cisa_kev, sync_github_advisories, sync_bounty_targets
+        from sync_manager import (
+            sync_all_sources, sync_cisa_kev, sync_github_advisories,
+            sync_hackerone_disclosures, sync_first_epss, sync_bounty_targets,
+            sync_payloads_and_bypasses
+        )
         sources = args.get("sources", ["all"])
         results = {}
 
@@ -663,8 +667,14 @@ def execute_tool(name, args):
                 results["cisa_kev"] = sync_cisa_kev()
             if "github_advisories" in sources:
                 results["github_advisories"] = sync_github_advisories()
+            if "hackerone_disclosures" in sources:
+                results["hackerone_disclosures"] = sync_hackerone_disclosures(limit=1000)
+            if "first_epss" in sources:
+                results["first_epss"] = sync_first_epss(batch_size=50)
             if "bounty_targets" in sources:
                 results["bounty_targets"] = sync_bounty_targets()
+            if "payloads_bypasses" in sources:
+                results["payloads_bypasses"] = sync_payloads_and_bypasses()
 
         conn.close()
         lines = ["### Live Data Sources Synchronization Report\n"]
