@@ -159,14 +159,15 @@ def sync_github_advisories():
     conn.close()
     return {"source": "GitHub Advisories", "added_or_updated": updated}
 
-def sync_hackerone_disclosures(limit=3000):
+def sync_hackerone_disclosures(limit=None):
     """
     Fetch live disclosed HackerOne bug bounty reports and writeups.
+    If limit is None, ingests all available disclosed reports.
     """
     url = 'https://raw.githubusercontent.com/reddelexc/hackerone-reports/master/data.csv'
     print(f'Fetching HackerOne Disclosed Reports from {url}...')
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         text = resp.read().decode('utf-8', errors='ignore')
 
     reader = csv.DictReader(io.StringIO(text))
@@ -177,8 +178,9 @@ def sync_hackerone_disclosures(limit=3000):
 
     updated = 0
     program_stats = {}
+    target_rows = rows if limit is None else rows[:limit]
 
-    for row in rows[:limit]:
+    for row in target_rows:
         link = row.get('link', '')
         rep_id = None
         if 'reports/' in link:
@@ -439,7 +441,7 @@ def sync_all_sources():
 
     # 3. HackerOne Disclosures
     try:
-        r3 = sync_hackerone_disclosures(limit=3000)
+        r3 = sync_hackerone_disclosures(limit=None)
         results["hackerone_disclosures"] = r3
         status["sources"]["hackerone_disclosures"] = {"status": "synced", "count": r3["reports_synced"], "last_updated": now_str}
     except Exception as e:

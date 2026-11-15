@@ -28,8 +28,8 @@
     },
     "hackerone_disclosures": {
       "status": "synced",
-      "count": 3000,
-      "last_updated": "2026-11-15 12:05:21Z"
+      "count": 15219,
+      "last_updated": "2026-11-15 12:21:47Z"
     },
     "payloads_bypasses": {
       "status": "synced",

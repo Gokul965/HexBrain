@@ -668,7 +668,7 @@ def execute_tool(name, args):
             if "github_advisories" in sources:
                 results["github_advisories"] = sync_github_advisories()
             if "hackerone_disclosures" in sources:
-                results["hackerone_disclosures"] = sync_hackerone_disclosures(limit=1000)
+                results["hackerone_disclosures"] = sync_hackerone_disclosures(limit=None)
             if "first_epss" in sources:
                 results["first_epss"] = sync_first_epss(batch_size=50)
             if "bounty_targets" in sources:
