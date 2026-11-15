@@ -1,0 +1,30 @@
+{
+  "last_sync": "2026-11-15 11:55:18Z",
+  "sources": {
+    "cisa_kev": {
+      "status": "synced",
+      "count": 1781,
+      "last_updated": "2026-11-15 11:55:18Z"
+    },
+    "github_advisories": {
+      "status": "synced",
+      "count": 30,
+      "last_updated": "2026-11-15 11:55:18Z"
+    },
+    "first_epss": {
+      "status": "ready",
+      "count": 1781,
+      "last_updated": null
+    },
+    "bounty_targets": {
+      "status": "synced",
+      "count": 89,
+      "last_updated": "2026-11-15 11:55:18Z"
+    },
+    "payloads": {
+      "status": "ready",
+      "count": 18,
+      "last_updated": null
+    }
+  }
+}

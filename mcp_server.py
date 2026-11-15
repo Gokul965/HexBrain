@@ -179,6 +179,31 @@ TOOLS = [
                 }
             }
         }
+    },
+    {
+        "name": "sync_live_sources",
+        "description": "Lively capture and ingest latest intelligence from external security feeds: CISA KEV, GitHub Advisory Database, HackerOne/Bugcrowd targets, and EPSS scores.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "sources": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["all", "cisa_kev", "github_advisories", "bounty_targets"]
+                    },
+                    "description": "List of sources to synchronize (default: ['all'])"
+                }
+            }
+        }
+    },
+    {
+        "name": "get_data_sources_status",
+        "description": "Get current status, record counts, and last synchronization timestamps for all connected live security data feeds.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {}
+        }
     }
 ]
 
@@ -624,6 +649,46 @@ def execute_tool(name, args):
             kev_str = "🔥 **YES (CISA KEV)**" if r.get('kev') else "No"
             like_pct = f"{int(r['likelihood'] * 100)}%" if r.get('likelihood') else "N/A"
             lines.append(f"| **{r['id']}** | {r['title']} | `{r['cvss']}` | {kev_str} | {like_pct} |")
+        return "\n".join(lines)
+
+    elif name == "sync_live_sources":
+        from sync_manager import sync_all_sources, sync_cisa_kev, sync_github_advisories, sync_bounty_targets
+        sources = args.get("sources", ["all"])
+        results = {}
+
+        if "all" in sources:
+            results = sync_all_sources()
+        else:
+            if "cisa_kev" in sources:
+                results["cisa_kev"] = sync_cisa_kev()
+            if "github_advisories" in sources:
+                results["github_advisories"] = sync_github_advisories()
+            if "bounty_targets" in sources:
+                results["bounty_targets"] = sync_bounty_targets()
+
+        conn.close()
+        lines = ["### Live Data Sources Synchronization Report\n"]
+        for src, res in results.items():
+            if "error" in res:
+                lines.append(f"- ❌ **{src}**: Error - `{res['error']}`")
+            else:
+                lines.append(f"- ✅ **{res.get('source', src)}**: Synchronized successfully!")
+                for k, v in res.items():
+                    if k != "source":
+                        lines.append(f"  - *{k}:* {v}")
+        return "\n".join(lines)
+
+    elif name == "get_data_sources_status":
+        from sync_manager import get_sync_status
+        status = get_sync_status()
+        conn.close()
+
+        lines = ["### Connected Security Intelligence Data Sources\n"]
+        lines.append(f"**Last Full Synchronization:** `{status.get('last_sync') or 'Never'}`\n")
+        lines.append("| Source Name | Feed Type | Current Status | Records | Last Updated |")
+        lines.append("|---|---|---|---|---|")
+        for k, v in status.get("sources", {}).items():
+            lines.append(f"| **{k}** | REST / Live JSON | `{v.get('status')}` | {v.get('count', 0):,} | `{v.get('last_updated') or 'Initial'}` |")
         return "\n".join(lines)
 
     else:

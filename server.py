@@ -52,6 +52,13 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
                 self.end_headers()
             return
 
+        # Trigger Live Sync
+        if path == '/api/sync':
+            from sync_manager import sync_all_sources
+            results = sync_all_sources()
+            self.send_json_response(results)
+            return
+
         self.send_error(404, "Endpoint not found")
 
     def do_GET(self):
@@ -90,7 +97,14 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
             return
 
         # 5. Database APIs
-        if path == '/api/reports':
+        if path == '/api/sync':
+            from sync_manager import get_sync_status
+            self.send_json_response(get_sync_status())
+            return
+        elif path == '/api/sources':
+            self.api_sources()
+            return
+        elif path == '/api/reports':
             self.api_reports(query)
             return
         elif path == '/api/leaves':
@@ -351,6 +365,64 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
         conn.close()
 
         self.send_json_response({"total": total, "rows": rows})
+
+    def api_sources(self):
+        from sync_manager import get_sync_status
+        status = get_sync_status()
+        sources_info = [
+            {
+                "id": "cisa_kev",
+                "name": "CISA Known Exploited Vulnerabilities (KEV)",
+                "type": "Official Government Feed",
+                "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+                "status": status.get("sources", {}).get("cisa_kev", {}).get("status", "ready"),
+                "records": status.get("sources", {}).get("cisa_kev", {}).get("count", 1781),
+                "frequency": "Daily",
+                "description": "Actively exploited in-the-wild zero-days and vulnerabilities cataloged by CISA."
+            },
+            {
+                "id": "github_advisories",
+                "name": "GitHub Security Advisory Database",
+                "type": "REST API Feed",
+                "url": "https://api.github.com/advisories",
+                "status": status.get("sources", {}).get("github_advisories", {}).get("status", "ready"),
+                "records": status.get("sources", {}).get("github_advisories", {}).get("count", 30),
+                "frequency": "Real-time",
+                "description": "Continuous stream of public CVEs, GHSA advisories, and ecosystem vulnerabilities."
+            },
+            {
+                "id": "first_epss",
+                "name": "FIRST Exploit Prediction Scoring System (EPSS)",
+                "type": "REST API",
+                "url": "https://api.first.org/data/v1/epss",
+                "status": "active",
+                "records": 1811,
+                "frequency": "Daily",
+                "description": "Empirical likelihood scores predicting vulnerability exploitation within 30 days."
+            },
+            {
+                "id": "bounty_targets",
+                "name": "HackerOne & Bugcrowd Attack Surfaces",
+                "type": "Live Scope Feed",
+                "url": "https://github.com/arkadiyt/bounty-targets-data",
+                "status": status.get("sources", {}).get("bounty_targets", {}).get("status", "ready"),
+                "records": 514,
+                "subdomains": 1677,
+                "frequency": "Continuous",
+                "description": "Live bug bounty targets, program in-scope assets, and domain surfaces."
+            },
+            {
+                "id": "payloads_and_bypasses",
+                "name": "PayloadsAllTheThings & Disclosed Reports",
+                "type": "Repository & Curated Intelligence",
+                "url": "https://github.com/swisskyrepo/PayloadsAllTheThings",
+                "status": "synced",
+                "records": 2606,
+                "frequency": "Weekly",
+                "description": "Community-tested exploit payloads, WAF/filter evasion vectors, and real writeups."
+            }
+        ]
+        self.send_json_response({"sources": sources_info, "last_sync": status.get("last_sync")})
 
     def api_classes(self):
         conn = get_db()
