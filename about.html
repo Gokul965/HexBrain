@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="theme-color" content="#13120e"/>
+  <meta name="color-scheme" content="dark"/>
+  <title>About – HexBrain</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Recursive:wght,MONO@300..1000,0..1&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="styles.css"/>
+  <link rel="stylesheet" href="pages.css"/>
+</head>
+<body>
+  <div class="page-root">
+    <header class="page-top">
+      <a href="index.html" class="brand-link">
+        <svg width="24" height="24" viewBox="0 0 64 64" aria-hidden="true"><path d="M32.0 17.0L32.0 4.0M36.6 17.7L39.4 9.2M40.8 19.9L44.3 15.0M44.1 23.2L53.0 16.7M46.3 27.4L52.9 25.2M47.0 32.0L51.0 32.0M46.3 36.6L54.8 39.4M44.1 40.8L53.8 47.9M40.8 44.1L44.3 49.0M36.6 46.3L38.2 51.0M32.0 47.0L32.0 57.0M27.4 46.3L25.2 52.9M23.2 44.1L20.8 47.4M19.9 40.8L13.4 45.5M17.7 36.6L7.3 40.0M17.0 32.0L11.0 32.0M17.7 27.4L9.2 24.6M19.9 23.2L15.8 20.2M23.2 19.9L16.1 10.2M27.4 17.7L25.2 11.1" stroke="currentColor" stroke-width="2.7" fill="none"></path><circle cx="32" cy="32" r="9.5" fill="none" stroke="currentColor" stroke-width="1.6"></circle><circle cx="32" cy="32" r="3.4" fill="#ff6a3d"></circle></svg>
+        HexBrain
+      </a>
+      <nav class="page-nav">
+        <a href="index.html">Map</a>
+        <a href="browse.html">Browse</a>
+        <a href="bypasses.html">Bypasses</a>
+        <a href="payloads.html">Payloads</a>
+        <a href="cves.html">CVEs</a>
+        <a href="about.html" class="active">About</a>
+      </nav>
+      <div class="keys">
+        <a class="key" href="#account">MCP</a>
+      </div>
+    </header>
+
+    <main class="page-body page-narrow">
+      <h1>About HexBrain</h1>
+
+      <div class="about-content">
+        <p>HexBrain is an interactive knowledge map of publicly disclosed HackerOne bug bounty reports, organized by vulnerability class, weakness, and program.</p>
+
+        <h2>What it does</h2>
+        <p>Every publicly disclosed HackerOne report is indexed, categorized, and mapped into a queryable knowledge base. You can browse by vulnerability class, drill into specific weaknesses, compare across programs, and read the full researcher write-ups.</p>
+
+        <h2>AI integration</h2>
+        <p>Connect Claude, ChatGPT, or any AI assistant to search HexBrain's database while you test. Sign in to generate an API key, then configure your AI assistant to use HexBrain as a tool.</p>
+
+        <div class="connect-box">
+          <h3>Connect your AI assistant</h3>
+          <p>Direct local MCP access for Claude Desktop, Cursor, Windsurf, Antigravity, and custom AI agents. No login required. Then add HexBrain as a tool in your AI assistant's configuration.</p>
+
+          <div class="snippet">
+            <span>MCP Server URL</span>
+            <code>http://localhost:8080/api/mcp</code>
+            <button>Copy</button>
+          </div>
+
+          <div class="snippet">
+            <span>API Key</span>
+            <code>Open Access (No Key Needed)</code>
+            <button>Copy</button>
+          </div>
+
+          <div class="tools-section">
+            <h3>Available tools</h3>
+            <div class="tools-grid">
+              <div>
+                <dt>search_reports</dt>
+                <dd>Search disclosed bug bounty reports by keyword, vulnerability class, or program</dd>
+              </div>
+              <div>
+                <dt>get_report</dt>
+                <dd>Get the full write-up for a specific report by ID</dd>
+              </div>
+              <div>
+                <dt>list_weaknesses</dt>
+                <dd>List all weaknesses within a vulnerability class</dd>
+              </div>
+              <div>
+                <dt>list_programs</dt>
+                <dd>List all programs with their scope and report counts</dd>
+              </div>
+              <div>
+                <dt>search_payloads</dt>
+                <dd>Search the payload library by technique or vulnerability type</dd>
+              </div>
+              <div>
+                <dt>search_bypasses</dt>
+                <dd>Find bypass techniques by control type or vulnerability</dd>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <h2>Data</h2>
+        <ul>
+          <li>15,244 publicly disclosed HackerOne reports</li>
+          <li>18 vulnerability classes</li>
+          <li>215 specific weaknesses</li>
+          <li>428 bug bounty programs</li>
+          <li>$4,934,915 in total bounties</li>
+        </ul>
+
+        <h2>Credits</h2>
+        <p>Payload libraries integrate community resources including <a href="#" class="inline">PayloadsAllTheThings</a>. All disclosed report data is sourced from HackerOne's public hacktivity feed.</p>
+      </div>
+    </main>
+
+    <footer class="page-footer">
+      <div class="footer-links">
+        <a href="about.html">About</a>
+        <a href="#">Privacy</a>
+        <a href="#">Terms</a>
+        <a href="index.html">Map</a>
+      </div>
+    </footer>
+  </div>
+
+  <script>
+    document.querySelectorAll('.snippet button:not([disabled])').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const code = btn.parentElement.querySelector('code');
+        navigator.clipboard.writeText(code.textContent).then(() => {
+          btn.textContent = 'Copied!';
+          setTimeout(() => btn.textContent = 'Copy', 2000);
+        });
+      });
+    });
+  </script>
+</body>
+</html>
