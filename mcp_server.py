@@ -337,9 +337,9 @@ def handle_mcp_request(req):
                 }
             }
         elif uri == "hexbrain://stats":
-            cur.execute("SELECT count(*) FROM reports")
-            rep_cnt = cur.fetchone()[0]
-            cur.execute("SELECT count(*) FROM programs")
+            cur.execute("SELECT count(*), coalesce(sum(bounty), 0.0) FROM reports")
+            rep_cnt, total_bounty = cur.fetchone()
+            cur.execute("SELECT count(*) FROM programs WHERE count > 0")
             prog_cnt = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM cves")
             cve_cnt = cur.fetchone()[0]
@@ -349,7 +349,8 @@ def handle_mcp_request(req):
                 "programs": prog_cnt,
                 "classes": 18,
                 "cves_tracked": cve_cnt,
-                "total_bounties_tracked": "$4,934,915"
+                "total_bounties_tracked": f"${round(total_bounty):,}",
+                "total_bounty_raw": total_bounty
             }
             return {
                 "jsonrpc": "2.0",

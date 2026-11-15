@@ -461,9 +461,9 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
     def api_stats(self):
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("SELECT count(*) FROM reports")
-        rep_cnt = cur.fetchone()[0]
-        cur.execute("SELECT count(*) FROM programs")
+        cur.execute("SELECT count(*), coalesce(sum(bounty), 0.0) FROM reports")
+        rep_cnt, total_bounty = cur.fetchone()
+        cur.execute("SELECT count(*) FROM programs WHERE count > 0")
         prog_cnt = cur.fetchone()[0]
         cur.execute("SELECT count(*) FROM cves")
         cve_cnt = cur.fetchone()[0]
@@ -474,7 +474,8 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
             "weaknesses": 215,
             "programs": prog_cnt,
             "cves": cve_cnt,
-            "bounties": "$4,934,915"
+            "bounties": f"${round(total_bounty):,}",
+            "total_bounty_raw": total_bounty
         })
 
     def serve_openapi(self):
@@ -654,6 +655,12 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
 def run(port=8080):
+    try:
+        from sync_manager import refresh_frontend_data
+        refresh_frontend_data()
+    except Exception as e:
+        print("Note: Could not run initial frontend refresh:", e)
+
     server_address = ('0.0.0.0', port)
     httpd = HTTPServer(server_address, HexBrainHandler)
     print(f'HexBrain Backend & MCP Server running on http://0.0.0.0:{port}...')

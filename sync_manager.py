@@ -413,6 +413,136 @@ def sync_payloads_and_bypasses():
     conn.close()
     return {"source": "Payloads & Bypasses", "payloads_added": len(curated_payloads), "bypasses_added": len(curated_bypasses)}
 
+def refresh_frontend_data():
+    """
+    Re-aggregates all database metrics directly from reports table and updates
+    graph-data.json, index.html (DOM + RSC flight payload), browse.html, and about.html.
+    Ensures that any new reports or syncs immediately reflect across the frontend UI.
+    """
+    import re
+
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    conn = get_db()
+    cur = conn.cursor()
+
+    # 1. Source of truth totals from reports
+    cur.execute("SELECT count(*), coalesce(sum(bounty), 0.0) FROM reports")
+    total_reports, total_bounty = cur.fetchone()
+
+    # 2. Re-aggregate classes
+    cur.execute("""
+    UPDATE classes
+    SET 
+        count = (SELECT COUNT(*) FROM reports WHERE reports.class_id = classes.id),
+        bounty = (SELECT COALESCE(SUM(bounty), 0.0) FROM reports WHERE reports.class_id = classes.id)
+    """)
+    cur.execute("SELECT id, name, count, bounty FROM classes")
+    classes_list = cur.fetchall()
+    classes_dict = {r[0]: (r[2], r[3]) for r in classes_list}
+
+    # 3. Re-aggregate programs
+    cur.execute("""
+    UPDATE programs
+    SET 
+        count = (SELECT COUNT(*) FROM reports WHERE reports.program = programs.name),
+        bounty = (SELECT COALESCE(SUM(bounty), 0.0) FROM reports WHERE reports.program = programs.name)
+    """)
+    cur.execute("SELECT name, count, bounty FROM programs WHERE count > 0")
+    programs_dict = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+    active_programs_count = len(programs_dict)
+
+    conn.commit()
+    conn.close()
+
+    formatted_bounty = f"${round(total_bounty):,}"
+    formatted_reports = f"{total_reports:,}"
+
+    # 4. Update graph-data.json
+    graph_path = os.path.join(base_dir, 'graph-data.json')
+    if os.path.exists(graph_path):
+        try:
+            with open(graph_path, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+            d["total"] = total_reports
+            d["totalBounty"] = total_bounty
+            d["programs"] = active_programs_count
+            for cls in d.get("classes", []):
+                cid = cls.get("id")
+                if cid in classes_dict:
+                    cls["count"] = classes_dict[cid][0]
+                    cls["bounty"] = classes_dict[cid][1]
+            for prog in d.get("topPrograms", []):
+                pname = prog.get("name")
+                if pname in programs_dict:
+                    prog["count"] = programs_dict[pname][0]
+                    prog["bounty"] = programs_dict[pname][1]
+            with open(graph_path, 'w', encoding='utf-8') as f:
+                json.dump(d, f)
+        except Exception as e:
+            print("Error updating graph-data.json:", e)
+
+    # 5. Update index.html
+    index_path = os.path.join(base_dir, 'index.html')
+    if os.path.exists(index_path):
+        try:
+            with open(index_path, 'r', encoding='utf-8') as f:
+                html = f.read()
+
+            # Replace visible DOM numbers
+            html = re.sub(r'class="xDyCiW_stat"><b>\$[\d,]+</b><span>in bounties</span>',
+                          f'class="xDyCiW_stat"><b>{formatted_bounty}</b><span>in bounties</span>', html)
+            html = re.sub(r'class="xDyCiW_stat"><b>[\d,]+</b><span>reports</span>',
+                          f'class="xDyCiW_stat"><b>{formatted_reports}</b><span>reports</span>', html)
+            html = re.sub(r'public HackerOne reports across \d+ programs',
+                          f'public HackerOne reports across {active_programs_count} programs', html)
+
+            # Replace RSC flight payload numbers
+            html = re.sub(r'\\\"totalBounty\\\":\s*[\d\.]+', f'\\\\\"totalBounty\\\\\":{round(total_bounty, 2)}', html)
+            html = re.sub(r'\\\"total\\\":\s*\d+', f'\\\\\"total\\\\\":{total_reports}', html)
+            html = re.sub(r'\\\"programs\\\":\s*\d+', f'\\\\\"programs\\\\\":{active_programs_count}', html)
+
+            for cid, (count, bounty) in classes_dict.items():
+                pattern = r"(\\\"id\\\":\\\"" + cid + r"\\\",\\\"name\\\":[^,]+?,\\\"count\\\":)\d+(,\\\"bounty\\\":)[\d\.]+"
+                repl = r"\g<1>" + str(count) + r"\g<2>" + str(round(bounty, 2))
+                html = re.sub(pattern, repl, html)
+
+            with open(index_path, 'w', encoding='utf-8') as f:
+                f.write(html)
+        except Exception as e:
+            print("Error updating index.html:", e)
+
+    # 6. Update browse.html & about.html
+    browse_path = os.path.join(base_dir, 'pages_data', 'browse.html')
+    if os.path.exists(browse_path):
+        try:
+            with open(browse_path, 'r', encoding='utf-8') as f:
+                bhtml = f.read()
+            bhtml = re.sub(r'<b>[\d,]+</b><span>disclosed reports</span>', f'<b>{formatted_reports}</b><span>disclosed reports</span>', bhtml)
+            bhtml = re.sub(r'<b>[\d,]+</b><span>programs</span>', f'<b>{active_programs_count}</b><span>programs</span>', bhtml)
+            max_c = max([c[0] for c in classes_dict.values()] or [1])
+            for cid, (count, _) in classes_dict.items():
+                v = round(count / max_c, 4)
+                pattern = r"(<a href=\"/class/" + cid.lower() + r"\">[^<]+</a><i style=\"--v:)[^\"]*(\" aria-hidden=\"true\"></i><b>)[\d,]+(</b>)"
+                bhtml = re.sub(pattern, r"\g<1>" + str(v) + r"\g<2>" + f"{count:,}" + r"\g<3>", bhtml)
+            with open(browse_path, 'w', encoding='utf-8') as f:
+                f.write(bhtml)
+        except Exception as e:
+            print("Error updating browse.html:", e)
+
+    about_path = os.path.join(base_dir, 'pages_data', 'about.html')
+    if os.path.exists(about_path):
+        try:
+            with open(about_path, 'r', encoding='utf-8') as f:
+                ahtml = f.read()
+            ahtml = re.sub(r'map of <!-- -->[\d,]+<!-- --> publicly disclosed bug bounty reports from <!-- -->\d+<!-- --> programs',
+                           f'map of <!-- -->{formatted_reports}<!-- --> publicly disclosed bug bounty reports from <!-- -->{active_programs_count}<!-- --> programs', ahtml)
+            with open(about_path, 'w', encoding='utf-8') as f:
+                ahtml = f.write(ahtml)
+        except Exception as e:
+            print("Error updating about.html:", e)
+
+    print(f"Frontend data refreshed successfully: {total_reports} reports, {formatted_bounty} in bounties, {active_programs_count} programs.")
+
 def sync_all_sources():
     """
     Run full synchronization across all live sources.
@@ -477,6 +607,12 @@ def sync_all_sources():
 
     status["last_sync"] = now_str
     save_sync_status(status)
+
+    try:
+        refresh_frontend_data()
+    except Exception as e:
+        print("Error refreshing frontend data:", e)
+
     return results
 
 if __name__ == '__main__':
