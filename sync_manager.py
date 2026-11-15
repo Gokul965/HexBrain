@@ -496,15 +496,11 @@ def refresh_frontend_data():
             html = re.sub(r'public HackerOne reports across \d+ programs',
                           f'public HackerOne reports across {active_programs_count} programs', html)
 
-            # Replace RSC flight payload numbers
-            html = re.sub(r'\\\"totalBounty\\\":\s*[\d\.]+', f'\\\\\"totalBounty\\\\\":{round(total_bounty, 2)}', html)
-            html = re.sub(r'\\\"total\\\":\s*\d+', f'\\\\\"total\\\\\":{total_reports}', html)
-            html = re.sub(r'\\\"programs\\\":\s*\d+', f'\\\\\"programs\\\\\":{active_programs_count}', html)
-
-            for cid, (count, bounty) in classes_dict.items():
-                pattern = r"(\\\"id\\\":\\\"" + cid + r"\\\",\\\"name\\\":[^,]+?,\\\"count\\\":)\d+(,\\\"bounty\\\":)[\d\.]+"
-                repl = r"\g<1>" + str(count) + r"\g<2>" + str(round(bounty, 2))
-                html = re.sub(pattern, repl, html)
+            # Replace RSC flight payload numbers safely using exact block regex
+            m = re.search(r"(\\\"total\\\":\s*)\d+(,\\\"withBody\\\":\s*\d+,\\\"programs\\\":\s*)\d+(,\\\"weaknessCount\\\":\s*\d+,\\\"totalBounty\\\":\s*)[\d\.]+", html)
+            if m:
+                new_block = m.group(1) + str(total_reports) + m.group(2) + str(active_programs_count) + m.group(3) + str(round(total_bounty, 2))
+                html = html[:m.start()] + new_block + html[m.end():]
 
             with open(index_path, 'w', encoding='utf-8') as f:
                 f.write(html)
@@ -537,7 +533,9 @@ def refresh_frontend_data():
             ahtml = re.sub(r'map of <!-- -->[\d,]+<!-- --> publicly disclosed bug bounty reports from <!-- -->\d+<!-- --> programs',
                            f'map of <!-- -->{formatted_reports}<!-- --> publicly disclosed bug bounty reports from <!-- -->{active_programs_count}<!-- --> programs', ahtml)
             with open(about_path, 'w', encoding='utf-8') as f:
-                ahtml = f.write(ahtml)
+                f.write(ahtml)
+        except Exception as e:
+            print("Error updating about.html:", e)
         except Exception as e:
             print("Error updating about.html:", e)
 
