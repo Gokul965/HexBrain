@@ -228,10 +228,17 @@ RESOURCES = [
     }
 ]
 
-def handle_mcp_request(req):
+def handle_single_mcp_request(req):
     """
-    Process incoming JSON-RPC 2.0 MCP request and return dict response.
+    Process a single incoming JSON-RPC 2.0 MCP request dictionary.
     """
+    if not isinstance(req, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Invalid Request: root must be a JSON object"}
+        }
+
     method = req.get("method")
     req_id = req.get("id")
     params = req.get("params", {}) or {}
@@ -379,6 +386,27 @@ def handle_mcp_request(req):
                 "message": f"Method '{method}' not found"
             }
         }
+
+def handle_mcp_request(req):
+    """
+    Process incoming JSON-RPC 2.0 MCP request and return dict response.
+    Supports single object requests and JSON-RPC batch arrays.
+    """
+    if isinstance(req, list):
+        if not req:
+            return {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32600, "message": "Invalid Request: empty batch"}
+            }
+        responses = []
+        for item in req:
+            res = handle_single_mcp_request(item)
+            if res is not None:
+                responses.append(res)
+        return responses if responses else None
+
+    return handle_single_mcp_request(req)
 
 def execute_tool(name, args):
     """

@@ -10,6 +10,9 @@ import os
 import sys
 import json
 import sqlite3
+import html
+import time
+import threading
 import urllib.parse
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -18,6 +21,19 @@ from mcp_server import handle_mcp_request, TOOLS, SERVER_INFO
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PAGES_DIR = os.path.join(BASE_DIR, 'pages_data')
+
+# Concurrency & rate-limiting guards for sync
+SYNC_LOCK = threading.Lock()
+LAST_SYNC_TIME = 0.0
+SYNC_MIN_INTERVAL = 30  # minimum seconds between triggered syncs
+MAX_BODY_SIZE = 10 * 1024 * 1024  # 10 MB maximum POST body
+
+def parse_int(val, default, min_val=0, max_val=1000000):
+    """Safely parse integer query parameters with bounds."""
+    try:
+        return max(min_val, min(int(val), max_val))
+    except (ValueError, TypeError):
+        return default
 
 class HexBrainHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
@@ -36,7 +52,21 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
 
         # MCP Server Endpoint: /api/mcp or /mcp
         if path in ('/api/mcp', '/mcp'):
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length_header = self.headers.get('Content-Length')
+            if not content_length_header:
+                self.send_error(411, "Length Required")
+                return
+
+            try:
+                content_length = int(content_length_header)
+            except (ValueError, TypeError):
+                self.send_error(400, "Invalid Content-Length header")
+                return
+
+            if content_length < 0 or content_length > MAX_BODY_SIZE:
+                self.send_error(413, f"Payload Too Large (max {MAX_BODY_SIZE // (1024*1024)}MB)")
+                return
+
             post_data = self.rfile.read(content_length)
             try:
                 req = json.loads(post_data.decode('utf-8'))
@@ -44,7 +74,12 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
                 self.send_json_response({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {str(e)}"}}, 400)
                 return
 
-            response = handle_mcp_request(req)
+            try:
+                response = handle_mcp_request(req)
+            except Exception as e:
+                self.send_json_response({"jsonrpc": "2.0", "id": None, "error": {"code": -32603, "message": f"Internal error: {str(e)}"}}, 500)
+                return
+
             if response is not None:
                 self.send_json_response(response)
             else:
@@ -54,9 +89,38 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
 
         # Trigger Live Sync
         if path == '/api/sync':
-            from sync_manager import sync_all_sources
-            results = sync_all_sources()
-            self.send_json_response(results)
+            global LAST_SYNC_TIME
+
+            # Optional API Key authentication via HEXBRAIN_SYNC_KEY or HEXBRAIN_API_KEY
+            required_key = os.environ.get('HEXBRAIN_SYNC_KEY') or os.environ.get('HEXBRAIN_API_KEY')
+            if required_key:
+                auth_header = self.headers.get('Authorization', '')
+                api_key_header = self.headers.get('x-api-key', '')
+                token = auth_header.replace('Bearer ', '').strip() if auth_header.startswith('Bearer ') else auth_header.strip()
+                if token != required_key and api_key_header != required_key:
+                    self.send_json_response({"error": "Unauthorized: valid sync key required"}, 401)
+                    return
+
+            # Mutual exclusion guard: prevent concurrent sync runs
+            if not SYNC_LOCK.acquire(blocking=False):
+                self.send_json_response({"error": "Synchronization is already in progress. Please wait."}, 429)
+                return
+
+            try:
+                now = time.time()
+                if now - LAST_SYNC_TIME < SYNC_MIN_INTERVAL:
+                    wait_sec = int(SYNC_MIN_INTERVAL - (now - LAST_SYNC_TIME))
+                    self.send_json_response({"error": f"Rate limited: please wait {wait_sec}s before syncing again"}, 429)
+                    return
+
+                from sync_manager import sync_all_sources
+                results = sync_all_sources()
+                LAST_SYNC_TIME = time.time()
+                self.send_json_response(results)
+            except Exception as e:
+                self.send_json_response({"error": f"Sync failed: {str(e)}"}, 500)
+            finally:
+                SYNC_LOCK.release()
             return
 
         self.send_error(404, "Endpoint not found")
@@ -86,13 +150,13 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
 
         # 3. Report Detail Page: /report/{id}
         if path.startswith('/report/'):
-            rep_id = path.split('/')[2]
+            rep_id = urllib.parse.unquote(path[len('/report/'):])
             self.serve_report_page(rep_id)
             return
 
         # 4. CVE Detail Page: /cve/{id}
         if path.startswith('/cve/'):
-            cve_id = path.split('/')[2]
+            cve_id = urllib.parse.unquote(path[len('/cve/'):])
             self.serve_cve_page(cve_id)
             return
 
@@ -161,7 +225,43 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(content)
                 return
 
-        # 8. Static file fallback
+        # 8. Static file fallback with strict file and extension allowlist
+        clean_path = urllib.parse.unquote(path).lstrip('/')
+        norm_path = os.path.normpath(clean_path)
+
+        # Disallow directory traversal
+        if norm_path.startswith('..') or os.path.isabs(norm_path):
+            self.send_error(403, "Access denied")
+            return
+
+        # Disallow hidden files or directories (.git, .env, .gitignore, etc.)
+        parts = norm_path.split(os.sep)
+        if any(part.startswith('.') for part in parts if part):
+            self.send_error(404, "File not found")
+            return
+
+        # Explicitly block sensitive backend source code, databases, and logs
+        base_name = os.path.basename(norm_path).lower()
+        ext = os.path.splitext(norm_path)[1].lower()
+        BLOCKED_FILES = {'hexbrain.db', 'sync_status.json', 'security.md', 'readme.md', 'license'}
+        BLOCKED_EXTENSIONS = {'.py', '.pyc', '.db', '.sqlite', '.sqlite3', '.sh', '.env', '.bak', '.log'}
+
+        if base_name in BLOCKED_FILES or ext in BLOCKED_EXTENSIONS:
+            self.send_error(404, "File not found")
+            return
+
+        # Strict allowlist of client-facing asset extensions and exact asset files
+        ALLOWED_EXTENSIONS = {
+            '.html', '.css', '.js', '.json', '.webmanifest', '.ico',
+            '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp',
+            '.woff', '.woff2', '.ttf', '.eot', '.map', '.txt'
+        }
+        ALLOWED_EXACT_FILES = {'icon', 'apple-icon', 'favicon.ico'}
+
+        if ext not in ALLOWED_EXTENSIONS and base_name not in ALLOWED_EXACT_FILES:
+            self.send_error(404, "File not found")
+            return
+
         super().do_GET()
 
     # --- API Handlers ---
@@ -172,51 +272,53 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
         program = query.get('program', [''])[0].strip()
         weakness = query.get('weakness', [''])[0].strip()
         sort = query.get('sort', ['votes'])[0]
-        limit = int(query.get('limit', [40])[0])
-        offset = int(query.get('offset', [0])[0])
+        limit = parse_int(query.get('limit', [40])[0], default=40, min_val=1, max_val=200)
+        offset = parse_int(query.get('offset', [0])[0], default=0, min_val=0, max_val=1000000)
 
         conn = get_db()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
 
-        sql = "SELECT id, title, program, severity, weakness, bounty, votes, reporter, disclosed_at, substate FROM reports WHERE 1=1"
-        params = []
+            sql = "SELECT id, title, program, severity, weakness, bounty, votes, reporter, disclosed_at, substate FROM reports WHERE 1=1"
+            params = []
 
-        if q:
-            sql += " AND (title LIKE ? OR weakness LIKE ? OR program LIKE ? OR writeup LIKE ?)"
-            term = f"%{q}%"
-            params.extend([term, term, term, term])
+            if q:
+                sql += " AND (title LIKE ? OR weakness LIKE ? OR program LIKE ? OR writeup LIKE ?)"
+                term = f"%{q}%"
+                params.extend([term, term, term, term])
 
-        if v_class:
-            sql += " AND (class_id = ? OR class_id LIKE ?)"
-            params.extend([v_class.upper(), f"%{v_class}%"])
+            if v_class:
+                sql += " AND (class_id = ? OR class_id LIKE ?)"
+                params.extend([v_class.upper(), f"%{v_class}%"])
 
-        if program:
-            sql += " AND program = ?"
-            params.append(program)
+            if program:
+                sql += " AND program = ?"
+                params.append(program)
 
-        if weakness:
-            sql += " AND weakness = ?"
-            params.append(weakness)
+            if weakness:
+                sql += " AND weakness = ?"
+                params.append(weakness)
 
-        # count query
-        count_sql = "SELECT count(*) FROM (" + sql + ")"
-        cur.execute(count_sql, params)
-        total = cur.fetchone()[0]
+            # count query
+            count_sql = "SELECT count(*) FROM (" + sql + ")"
+            cur.execute(count_sql, params)
+            total = cur.fetchone()[0]
 
-        # sorting
-        if sort == 'bounty':
-            sql += " ORDER BY bounty DESC, votes DESC"
-        elif sort == 'recent':
-            sql += " ORDER BY disclosed_at DESC"
-        else:
-            sql += " ORDER BY votes DESC, bounty DESC"
+            # sorting
+            if sort == 'bounty':
+                sql += " ORDER BY bounty DESC, votes DESC"
+            elif sort == 'recent':
+                sql += " ORDER BY disclosed_at DESC"
+            else:
+                sql += " ORDER BY votes DESC, bounty DESC"
 
-        sql += " LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
 
-        cur.execute(sql, params)
-        rows = [dict(r) for r in cur.fetchall()]
-        conn.close()
+            cur.execute(sql, params)
+            rows = [dict(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
 
         self.send_json_response({"total": total, "rows": rows})
 
@@ -286,55 +388,62 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
         month = query.get('month', ['0'])[0]
         band = query.get('band', ['0'])[0]
         q = query.get('q', [''])[0].strip()
-        offset = int(query.get('offset', [0])[0])
+        offset = parse_int(query.get('offset', [0])[0], default=0, min_val=0, max_val=1000000)
 
         conn = get_db()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
 
-        sql = "SELECT id, title, cvss, product, kev, likelihood FROM cves WHERE year = ?"
-        params = [int(year) if year.isdigit() else 2026]
+            sql = "SELECT id, title, cvss, product, kev, likelihood FROM cves WHERE year = ?"
+            params = [int(year) if year.isdigit() else 2026]
 
-        if q:
-            sql += " AND (id LIKE ? OR title LIKE ? OR product LIKE ?)"
-            term = f"%{q}%"
-            params.extend([term, term, term])
+            if q:
+                sql += " AND (id LIKE ? OR title LIKE ? OR product LIKE ?)"
+                term = f"%{q}%"
+                params.extend([term, term, term])
 
-        count_sql = "SELECT count(*) FROM (" + sql + ")"
-        cur.execute(count_sql, params)
-        total = cur.fetchone()[0]
+            count_sql = "SELECT count(*) FROM (" + sql + ")"
+            cur.execute(count_sql, params)
+            total = cur.fetchone()[0]
 
-        sql += " ORDER BY kev DESC, cvss DESC LIMIT 40 OFFSET ?"
-        params.append(offset)
+            sql += " ORDER BY kev DESC, cvss DESC LIMIT 40 OFFSET ?"
+            params.append(offset)
 
-        cur.execute(sql, params)
-        rows = []
-        for r in cur.fetchall():
-            likelihood_pct = int(r['likelihood'] * 100) if r['likelihood'] else 85
-            rows.append([r['id'], r['title'], r['cvss'], r['product'], likelihood_pct, r['kev']])
+            cur.execute(sql, params)
+            rows = []
+            for r in cur.fetchall():
+                likelihood_pct = int(r['likelihood'] * 100) if r['likelihood'] else 85
+                rows.append([r['id'], r['title'], r['cvss'], r['product'], likelihood_pct, r['kev']])
+        finally:
+            conn.close()
 
-        conn.close()
         self.send_json_response({"total": total, "rows": rows})
 
     def api_cve_core(self, query):
         conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT id, title, cvss FROM cves WHERE kev = 1 ORDER BY cvss DESC LIMIT 100")
-        rows = [[r[0], r[1], r[2]] for r in cur.fetchall()]
-        conn.close()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, title, cvss FROM cves WHERE kev = 1 ORDER BY cvss DESC LIMIT 100")
+            rows = [[r[0], r[1], r[2]] for r in cur.fetchall()]
+        finally:
+            conn.close()
         self.send_json_response(rows)
 
     def api_program_dots(self, query):
         prog = query.get('program', [''])[0].strip()
         conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT weakness, count(*) as cnt FROM reports WHERE program = ? GROUP BY weakness", (prog,))
-        rows = cur.fetchall()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT weakness, count(*) as cnt FROM reports WHERE program = ? GROUP BY weakness", (prog,))
+            rows = cur.fetchall()
+        finally:
+            conn.close()
 
         result = {}
         for r in rows:
             w_name = r[0]
-            cnt = r[1]
+            # Cap the range list to prevent response amplification / memory exhaustion
+            cnt = min(r[1], 1000)
             result[w_name] = list(range(cnt))
 
         self.send_json_response(result)
@@ -342,27 +451,29 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
     def api_subdomains(self, query):
         prog = query.get('program', [''])[0].strip()
         q = query.get('q', [''])[0].strip()
-        offset = int(query.get('offset', [0])[0])
+        offset = parse_int(query.get('offset', [0])[0], default=0, min_val=0, max_val=1000000)
 
         conn = get_db()
-        cur = conn.cursor()
+        try:
+            cur = conn.cursor()
 
-        sql = "SELECT branch, domain, count FROM subdomains WHERE program_name = ?"
-        params = [prog]
+            sql = "SELECT branch, domain, count FROM subdomains WHERE program_name = ?"
+            params = [prog]
 
-        if q:
-            sql += " AND domain LIKE ?"
-            params.append(f"%{q}%")
+            if q:
+                sql += " AND domain LIKE ?"
+                params.append(f"%{q}%")
 
-        cur.execute("SELECT count(*) FROM (" + sql + ")", params)
-        total = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM (" + sql + ")", params)
+            total = cur.fetchone()[0]
 
-        sql += " ORDER BY count DESC LIMIT 50 OFFSET ?"
-        params.append(offset)
+            sql += " ORDER BY count DESC LIMIT 50 OFFSET ?"
+            params.append(offset)
 
-        cur.execute(sql, params)
-        rows = [[r['domain'], r['count']] for r in cur.fetchall()]
-        conn.close()
+            cur.execute(sql, params)
+            rows = [[r['domain'], r['count']] for r in cur.fetchall()]
+        finally:
+            conn.close()
 
         self.send_json_response({"total": total, "rows": rows})
 
@@ -515,26 +626,38 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
 
     def serve_report_page(self, rep_id):
         conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM reports WHERE id = ?", (rep_id,))
-        row = cur.fetchone()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM reports WHERE id = ?", (rep_id,))
+            row = cur.fetchone()
+        finally:
+            conn.close()
 
         if not row:
-            self.send_error(404, f"Report #{rep_id} not found")
+            self.send_error(404, f"Report #{html.escape(str(rep_id))} not found")
             return
 
         r = dict(row)
-        bounty_str = f"${r['bounty']:,.0f}" if r.get('bounty') else "Undisclosed"
-        sev = (r.get('severity') or 'N/A').upper()
+        bounty_val = r.get('bounty')
+        bounty_str = f"${bounty_val:,.0f}" if bounty_val else "Undisclosed"
+        sev = html.escape((r.get('severity') or 'N/A').upper())
+        rep_id_safe = html.escape(str(r.get('id', '')))
+        title_safe = html.escape(str(r.get('title') or ''))
+        program_safe = html.escape(str(r.get('program') or ''))
+        weakness_safe = html.escape(str(r.get('weakness') or ''))
+        bounty_safe = html.escape(bounty_str)
+        votes_safe = html.escape(str(r.get('votes') or 0))
+        writeup_safe = html.escape(str(r.get('writeup') or 'No summary recorded.'))
+        steps_safe = html.escape(str(r.get('steps_to_reproduce') or '1. Review affected endpoints.\n2. Execute proof of concept.\n3. Validate impact.'))
+        impact_safe = html.escape(str(r.get('impact') or 'Compromise of confidentiality, integrity, or application state.'))
 
-        html = f"""<!DOCTYPE html>
+        page_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="theme-color" content="#13120e"/>
-  <title>Report #{r['id']} · {r['title']} – HexBrain</title>
+  <title>Report #{rep_id_safe} · {title_safe} – HexBrain</title>
   <link rel="stylesheet" href="/styles.css"/>
   <style>
     body {{ background: #13120e; color: #efe6d0; font-family: system-ui, sans-serif; margin: 0; padding: 24px; }}
@@ -557,36 +680,36 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
   <div class="nav-back"><a href="/">&larr; Back to HexBrain Map</a></div>
   <div class="container">
     <span class="badge">{sev} SEVERITY</span>
-    <h1>{r['title']}</h1>
+    <h1>{title_safe}</h1>
     <div class="meta">
-      <span><strong>Program:</strong> {r['program']}</span>
-      <span><strong>Weakness:</strong> {r['weakness']}</span>
-      <span><strong>Bounty:</strong> {bounty_str}</span>
-      <span><strong>Upvotes:</strong> {r['votes']}</span>
-      <span><strong>Report ID:</strong> #{r['id']}</span>
+      <span><strong>Program:</strong> {program_safe}</span>
+      <span><strong>Weakness:</strong> {weakness_safe}</span>
+      <span><strong>Bounty:</strong> {bounty_safe}</span>
+      <span><strong>Upvotes:</strong> {votes_safe}</span>
+      <span><strong>Report ID:</strong> #{rep_id_safe}</span>
     </div>
 
     <div class="section">
       <h3>Summary &amp; Findings</h3>
-      <p>{r.get('writeup') or 'No summary recorded.'}</p>
+      <p>{writeup_safe}</p>
     </div>
 
     <div class="section">
       <h3>Steps to Reproduce</h3>
-      <pre>{r.get('steps_to_reproduce') or '1. Review affected endpoints.\n2. Execute proof of concept.\n3. Validate impact.'}</pre>
+      <pre>{steps_safe}</pre>
     </div>
 
     <div class="section">
       <h3>Impact</h3>
-      <p>{r.get('impact') or 'Compromise of confidentiality, integrity, or application state.'}</p>
+      <p>{impact_safe}</p>
     </div>
 
-    <a href="https://hackerone.com/reports/{r['id']}" target="_blank" rel="noreferrer" class="btn-h1">View Original on HackerOne &rarr;</a>
+    <a href="https://hackerone.com/reports/{rep_id_safe}" target="_blank" rel="noreferrer" class="btn-h1">View Original on HackerOne &rarr;</a>
   </div>
 </body>
 </html>
 """
-        content = html.encode('utf-8')
+        content = page_html.encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(content)))
@@ -595,22 +718,29 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
 
     def serve_cve_page(self, cve_id):
         conn = get_db()
-        cur = conn.cursor()
-        cur.execute("SELECT * FROM cves WHERE id = ?", (cve_id,))
-        row = cur.fetchone()
-        conn.close()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM cves WHERE id = ?", (cve_id,))
+            row = cur.fetchone()
+        finally:
+            conn.close()
 
-        title = row['title'] if row else cve_id
-        cvss = row['cvss'] if row else 8.5
-        kev = "YES (Active in wild)" if row and row['kev'] else "No known active exploitation"
+        raw_title = row['title'] if row else cve_id
+        cvss_val = row['cvss'] if row else 8.5
+        kev_text = "YES (Active in wild)" if row and row['kev'] else "No known active exploitation"
 
-        html = f"""<!DOCTYPE html>
+        cve_id_safe = html.escape(str(cve_id))
+        title_safe = html.escape(str(raw_title))
+        cvss_safe = html.escape(str(cvss_val))
+        kev_safe = html.escape(kev_text)
+
+        page_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="theme-color" content="#13120e"/>
-  <title>{cve_id} – HexBrain CVE Tracker</title>
+  <title>{cve_id_safe} – HexBrain CVE Tracker</title>
   <link rel="stylesheet" href="/styles.css"/>
   <style>
     body {{ background: #13120e; color: #efe6d0; font-family: system-ui, sans-serif; margin: 0; padding: 24px; }}
@@ -625,18 +755,18 @@ class HexBrainHandler(SimpleHTTPRequestHandler):
 <body>
   <div class="nav-back"><a href="/">&larr; Back to HexBrain Map</a></div>
   <div class="container">
-    <span class="badge">CVSS {cvss}</span>
-    <h1>{cve_id}</h1>
+    <span class="badge">CVSS {cvss_safe}</span>
+    <h1>{cve_id_safe}</h1>
     <div class="meta">
-      <span><strong>Vulnerability:</strong> {title}</span>
-      <span><strong>CISA KEV:</strong> {kev}</span>
+      <span><strong>Vulnerability:</strong> {title_safe}</span>
+      <span><strong>CISA KEV:</strong> {kev_safe}</span>
     </div>
     <p>Tracked in HexBrain vulnerability intelligence graph. Correlated with real-world bug bounty write-ups, active exploit payloads, and defensive bypass techniques.</p>
   </div>
 </body>
 </html>
 """
-        content = html.encode('utf-8')
+        content = page_html.encode('utf-8')
         self.send_response(200)
         self.send_header('Content-Type', 'text/html; charset=utf-8')
         self.send_header('Content-Length', str(len(content)))
