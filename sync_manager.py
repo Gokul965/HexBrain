@@ -17,8 +17,11 @@ import sqlite3
 import urllib.request
 import urllib.error
 import time
+import threading
 from datetime import datetime
 from db import get_db
+
+SYNC_LOCK = threading.Lock()
 
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36'
@@ -221,14 +224,14 @@ def sync_hackerone_disclosures(limit=None):
         program_stats[program]['count'] += 1
         program_stats[program]['bounty'] += bounty
 
-    # Update programs table with bounty tallies
+    # Update programs table with bounty tallies idempotently
     for prog, stats in program_stats.items():
         cur.execute('''
         INSERT INTO programs (name, count, bounty, logo, total_subdomains)
         VALUES (?, ?, ?, '', 1)
         ON CONFLICT(name) DO UPDATE SET
-            count=count + excluded.count,
-            bounty=bounty + excluded.bounty
+            count=excluded.count,
+            bounty=excluded.bounty
         ''', (prog, stats['count'], stats['bounty']))
 
     conn.commit()
@@ -397,21 +400,35 @@ def sync_payloads_and_bypasses():
     conn = get_db()
     cur = conn.cursor()
 
-    for p in curated_payloads:
-        cur.execute('''
-        INSERT INTO payloads (category, title, payload, description, variant)
-        VALUES (?, ?, ?, ?, ?)
-        ''', p)
+    cur.execute("SELECT title, payload FROM payloads")
+    existing_payloads = {(r[0], r[1]) for r in cur.fetchall()}
 
+    added_payloads = 0
+    for p in curated_payloads:
+        if (p[1], p[2]) not in existing_payloads:
+            cur.execute('''
+            INSERT INTO payloads (category, title, payload, description, variant)
+            VALUES (?, ?, ?, ?, ?)
+            ''', p)
+            existing_payloads.add((p[1], p[2]))
+            added_payloads += 1
+
+    cur.execute("SELECT title, technique FROM bypasses")
+    existing_bypasses = {(r[0], r[1]) for r in cur.fetchall()}
+
+    added_bypasses = 0
     for b in curated_bypasses:
-        cur.execute('''
-        INSERT INTO bypasses (title, protection_type, vulnerability, technique, program, bounty, report_id, description, code_example)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', b)
+        if (b[0], b[3]) not in existing_bypasses:
+            cur.execute('''
+            INSERT INTO bypasses (title, protection_type, vulnerability, technique, program, bounty, report_id, description, code_example)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', b)
+            existing_bypasses.add((b[0], b[3]))
+            added_bypasses += 1
 
     conn.commit()
     conn.close()
-    return {"source": "Payloads & Bypasses", "payloads_added": len(curated_payloads), "bypasses_added": len(curated_bypasses)}
+    return {"source": "Payloads & Bypasses", "payloads_added": added_payloads, "bypasses_added": added_bypasses}
 
 def refresh_frontend_data():
     """
@@ -543,75 +560,81 @@ def refresh_frontend_data():
 
 def sync_all_sources():
     """
-    Run full synchronization across all live sources.
+    Run full synchronization across all live sources safely with concurrency locking.
     """
-    status = get_sync_status()
-    results = {}
-    now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
-
-    # 1. CISA KEV
-    try:
-        r1 = sync_cisa_kev()
-        results["cisa_kev"] = r1
-        status["sources"]["cisa_kev"] = {"status": "synced", "count": r1["added_or_updated"], "last_updated": now_str}
-    except Exception as e:
-        results["cisa_kev"] = {"error": str(e)}
-        status["sources"]["cisa_kev"]["status"] = f"error: {str(e)}"
-
-    # 2. GitHub Advisories
-    try:
-        r2 = sync_github_advisories()
-        results["github_advisories"] = r2
-        status["sources"]["github_advisories"] = {"status": "synced", "count": r2["added_or_updated"], "last_updated": now_str}
-    except Exception as e:
-        results["github_advisories"] = {"error": str(e)}
-        status["sources"]["github_advisories"]["status"] = f"error: {str(e)}"
-
-    # 3. HackerOne Disclosures
-    try:
-        r3 = sync_hackerone_disclosures(limit=None)
-        results["hackerone_disclosures"] = r3
-        status["sources"]["hackerone_disclosures"] = {"status": "synced", "count": r3["reports_synced"], "last_updated": now_str}
-    except Exception as e:
-        results["hackerone_disclosures"] = {"error": str(e)}
-        status["sources"]["hackerone_disclosures"]["status"] = f"error: {str(e)}"
-
-    # 4. FIRST EPSS
-    try:
-        r4 = sync_first_epss(batch_size=100)
-        results["first_epss"] = r4
-        status["sources"]["first_epss"] = {"status": "synced", "count": r4["cves_scored"], "last_updated": now_str}
-    except Exception as e:
-        results["first_epss"] = {"error": str(e)}
-        status["sources"]["first_epss"]["status"] = f"error: {str(e)}"
-
-    # 5. Bounty Targets & Attack Surfaces
-    try:
-        r5 = sync_bounty_targets()
-        results["bounty_targets"] = r5
-        status["sources"]["bounty_targets"] = {"status": "synced", "count": r5["programs_updated"], "last_updated": now_str}
-    except Exception as e:
-        results["bounty_targets"] = {"error": str(e)}
-        status["sources"]["bounty_targets"]["status"] = f"error: {str(e)}"
-
-    # 6. Payloads and Bypasses
-    try:
-        r6 = sync_payloads_and_bypasses()
-        results["payloads_bypasses"] = r6
-        status["sources"]["payloads_bypasses"] = {"status": "synced", "count": r6["payloads_added"] + r6["bypasses_added"], "last_updated": now_str}
-    except Exception as e:
-        results["payloads_bypasses"] = {"error": str(e)}
-        status["sources"]["payloads_bypasses"]["status"] = f"error: {str(e)}"
-
-    status["last_sync"] = now_str
-    save_sync_status(status)
+    if not SYNC_LOCK.acquire(blocking=False):
+        return {"error": "Synchronization is already in progress. Please wait for completion."}
 
     try:
-        refresh_frontend_data()
-    except Exception as e:
-        print("Error refreshing frontend data:", e)
+        status = get_sync_status()
+        results = {}
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ")
 
-    return results
+        # 1. CISA KEV
+        try:
+            r1 = sync_cisa_kev()
+            results["cisa_kev"] = r1
+            status["sources"]["cisa_kev"] = {"status": "synced", "count": r1["added_or_updated"], "last_updated": now_str}
+        except Exception as e:
+            results["cisa_kev"] = {"error": str(e)}
+            status["sources"]["cisa_kev"]["status"] = f"error: {str(e)}"
+
+        # 2. GitHub Advisories
+        try:
+            r2 = sync_github_advisories()
+            results["github_advisories"] = r2
+            status["sources"]["github_advisories"] = {"status": "synced", "count": r2["added_or_updated"], "last_updated": now_str}
+        except Exception as e:
+            results["github_advisories"] = {"error": str(e)}
+            status["sources"]["github_advisories"]["status"] = f"error: {str(e)}"
+
+        # 3. HackerOne Disclosures
+        try:
+            r3 = sync_hackerone_disclosures(limit=None)
+            results["hackerone_disclosures"] = r3
+            status["sources"]["hackerone_disclosures"] = {"status": "synced", "count": r3["reports_synced"], "last_updated": now_str}
+        except Exception as e:
+            results["hackerone_disclosures"] = {"error": str(e)}
+            status["sources"]["hackerone_disclosures"]["status"] = f"error: {str(e)}"
+
+        # 4. FIRST EPSS
+        try:
+            r4 = sync_first_epss(batch_size=100)
+            results["first_epss"] = r4
+            status["sources"]["first_epss"] = {"status": "synced", "count": r4["cves_scored"], "last_updated": now_str}
+        except Exception as e:
+            results["first_epss"] = {"error": str(e)}
+            status["sources"]["first_epss"]["status"] = f"error: {str(e)}"
+
+        # 5. Bounty Targets & Attack Surfaces
+        try:
+            r5 = sync_bounty_targets()
+            results["bounty_targets"] = r5
+            status["sources"]["bounty_targets"] = {"status": "synced", "count": r5["programs_updated"], "last_updated": now_str}
+        except Exception as e:
+            results["bounty_targets"] = {"error": str(e)}
+            status["sources"]["bounty_targets"]["status"] = f"error: {str(e)}"
+
+        # 6. Payloads and Bypasses
+        try:
+            r6 = sync_payloads_and_bypasses()
+            results["payloads_bypasses"] = r6
+            status["sources"]["payloads_bypasses"] = {"status": "synced", "count": r6["payloads_added"] + r6["bypasses_added"], "last_updated": now_str}
+        except Exception as e:
+            results["payloads_bypasses"] = {"error": str(e)}
+            status["sources"]["payloads_bypasses"]["status"] = f"error: {str(e)}"
+
+        status["last_sync"] = now_str
+        save_sync_status(status)
+
+        try:
+            refresh_frontend_data()
+        except Exception as e:
+            print("Error refreshing frontend data:", e)
+
+        return results
+    finally:
+        SYNC_LOCK.release()
 
 if __name__ == '__main__':
     print('Testing HexBrain live intelligence synchronization across all sources...')
